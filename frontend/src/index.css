@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom Dark Scrollbar Styles */
+
+/* For Chrome, Safari, and Edge */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.5); /* Slate 900 background */
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155; /* Slate 700 thumb */
+  border-radius: 9999px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569; /* Slate 600 on hover */
+}
+
+/* For Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 rgba(15, 23, 42, 0.5);
+}
