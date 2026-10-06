@@ -138,6 +138,7 @@ export default function DashboardPage() {
           <BudgetOptimizer 
             recommendations={metrics.recommendations} 
             activeBudgets={metrics.active_budgets} 
+            onSuccess={fetchDashboardData}
           />
         </section>
       </main>

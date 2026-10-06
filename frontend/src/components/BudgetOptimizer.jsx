@@ -1,14 +1,16 @@
 import React, { useState } from 'react';
 import { Sparkles, CheckCircle2, Loader2 } from 'lucide-react';
 
-export default function BudgetOptimizer({ recommendations = [], activeBudgets = {} }) {
+export default function BudgetOptimizer({ recommendations = [], activeBudgets = {}, onSuccess }) {
   const [selectedIds, setSelectedIds] = useState(recommendations.map(r => r.id));
   const [isProcessing, setIsProcessing] = useState(false);
   const [optimizationResult, setOptimizationResult] = useState(null);
+  const [errorMsg, setErrorMsg] = useState(null);
 
   const toggleSelection = (id) => {
     setOptimizationResult(null);
-    setSelectedIds(prev => 
+    setErrorMsg(null);
+    setSelectedIds(prev =>
       prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
     );
   };
@@ -16,23 +18,45 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
   const handleApplyAI = async () => {
     if (selectedIds.length === 0) return;
     setIsProcessing(true);
+    setErrorMsg(null);
+    setOptimizationResult(null);
 
+    // Use the structured `category` field — no more regex parsing of titles.
     const activeRecs = recommendations.filter(r => selectedIds.includes(r.id));
-    const categoriesToOptimize = activeRecs.map(r => r.title.replace(/^(Optimize|Cap)\s+|\s+(Spend|Budget)$/g, '').trim());
+    const categoriesToOptimize = activeRecs
+      .map(r => r.category)
+      .filter(Boolean); // drop "Establish Monthly Savings Cap" placeholders
+
+    if (categoriesToOptimize.length === 0) {
+      setErrorMsg("None of the selected recommendations map to a real category.");
+      setIsProcessing(false);
+      return;
+    }
 
     try {
       const res = await fetch('http://127.0.0.1:8000/api/optimize/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          categories: categoriesToOptimize,
-          target_month: '2026-09' // You can make this dynamic if needed
-        })
+        // No target_month sent — backend derives it from the DB.
+        body: JSON.stringify({ categories: categoriesToOptimize })
       });
+
       const data = await res.json();
+
+      if (!res.ok || data.status === 'error') {
+        setErrorMsg(data.error || data.message || `Server error ${res.status}`);
+        return;
+      }
+
       setOptimizationResult(data);
+
+      if (onSuccess) {
+        await onSuccess();
+      }
+
     } catch (err) {
       console.error("AI Optimization error:", err);
+      setErrorMsg("Failed to reach the optimization service.");
     } finally {
       setIsProcessing(false);
     }
@@ -59,8 +83,8 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
                 key={rec.id}
                 onClick={() => toggleSelection(rec.id)}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
-                  isSelected 
-                    ? 'bg-slate-800/60 border-indigo-500/50 shadow-lg shadow-indigo-500/5' 
+                  isSelected
+                    ? 'bg-slate-800/60 border-indigo-500/50 shadow-lg shadow-indigo-500/5'
                     : 'bg-slate-800/20 border-slate-800 opacity-60 hover:opacity-100'
                 }`}
               >
@@ -76,7 +100,7 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
                   <input
                     type="checkbox"
                     checked={isSelected}
-                    onChange={() => {}} 
+                    onChange={() => {}}
                     className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                   />
                 </div>
@@ -90,7 +114,6 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
         )}
       </div>
 
-      {/* Show currently active saved budget limits if any exist */}
       {Object.keys(activeBudgets).length > 0 && (
         <div className="mb-4 p-3 bg-slate-800/40 border border-slate-700/60 rounded-xl">
           <p className="text-xs font-semibold text-slate-300 mb-2">Active Committed Budget Caps:</p>
@@ -124,6 +147,12 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
           )}
         </button>
 
+        {errorMsg && (
+          <div className="mt-3 p-3 bg-rose-950/40 border border-rose-500/30 rounded-xl text-rose-300 text-xs">
+            <strong>Error:</strong> {errorMsg}
+          </div>
+        )}
+
         {optimizationResult && (
           <div className="mt-3 p-3 bg-indigo-950/40 border border-indigo-500/30 rounded-xl space-y-1 text-indigo-300 text-xs animate-fade-in">
             <div className="flex items-center gap-2 font-semibold">
@@ -131,7 +160,8 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
               <span>Linear Programming Constraints Saved!</span>
             </div>
             <p className="text-slate-400">
-              Committed monthly caps permanently stored. Total optimized target savings: <strong className="text-white">₹{optimizationResult.total_optimized_savings}</strong>
+              Committed monthly caps for <strong className="text-white">{optimizationResult.target_month}</strong>.
+              Total optimized target savings: <strong className="text-white">₹{optimizationResult.total_optimized_savings}</strong>
             </p>
           </div>
         )}

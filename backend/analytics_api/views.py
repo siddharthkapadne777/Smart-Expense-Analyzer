@@ -7,11 +7,11 @@ from django.utils.dateparse import parse_date
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 
 from .ml_engine import SmartExpenseEngine
 from .models import Transaction, CategoryBudget
+from .optimizer import optimize_budget_caps
 
 
 class UploadApiView(APIView):
@@ -23,39 +23,43 @@ class UploadApiView(APIView):
             return Response({"error": "No file provided."}, status=400)
 
         try:
-            df, forecast = SmartExpenseEngine.process_upi_csv(file)
+            df = SmartExpenseEngine.process_upi_csv(file)
 
-            existing_records = set(
-                (d, str(m), float(round(a, 2)))
-                for d, m, a in Transaction.objects.values_list('date', 'merchant', 'amount')
+            # Dedup key includes transaction_id (bank ref) if available.
+            existing = set(
+                (d, str(m), float(round(a, 2)), str(tid or ""))
+                for d, m, a, tid in Transaction.objects.values_list(
+                    'date', 'merchant', 'amount', 'transaction_id'
+                )
             )
 
-            transactions_to_create = []
+            to_create = []
             for _, row in df.iterrows():
                 tx_date = pd.to_datetime(row['Date']).date()
                 tx_merchant = str(row['Merchant'])
                 tx_amount = float(round(row['Amount'], 2))
+                tx_txn_id = str(row.get('TransactionId', '') or '')
 
-                record_key = (tx_date, tx_merchant, tx_amount)
+                key = (tx_date, tx_merchant, tx_amount, tx_txn_id)
+                if key in existing:
+                    continue
 
-                if record_key not in existing_records:
-                    transactions_to_create.append(
-                        Transaction(
-                            date=tx_date,
-                            merchant=tx_merchant,
-                            amount=Decimal(str(tx_amount)),
-                            category=str(row['Category']),
-                            is_anomaly=bool(row['is_anomaly'])
-                        )
-                    )
-                    existing_records.add(record_key)
+                to_create.append(Transaction(
+                    date=tx_date,
+                    merchant=tx_merchant,
+                    amount=Decimal(str(tx_amount)),
+                    category=str(row['Category']),
+                    is_anomaly=bool(row['is_anomaly']),
+                    transaction_id=tx_txn_id,
+                ))
+                existing.add(key)
 
-            if transactions_to_create:
-                Transaction.objects.bulk_create(transactions_to_create, ignore_conflicts=True)
+            if to_create:
+                Transaction.objects.bulk_create(to_create, ignore_conflicts=True)
 
             return Response({
                 "status": "success",
-                "message": f"Processed successfully. Added {len(transactions_to_create)} new transactions."
+                "message": f"Processed successfully. Added {len(to_create)} new transactions."
             })
 
         except Exception as e:
@@ -68,7 +72,6 @@ class DashboardApiView(APIView):
         try:
             qs = Transaction.objects.all()
 
-            # 1. Date Range Filtering
             time_range = request.GET.get('range', 'all')
             start_date_param = request.GET.get('start_date')
             end_date_param = request.GET.get('end_date')
@@ -90,34 +93,30 @@ class DashboardApiView(APIView):
                 if start_d and end_d:
                     qs = qs.filter(date__range=[start_d, end_d])
 
-            # Extract ALL categories present in the date range BEFORE filtering transactions by category
-            all_categories_qs = qs.values('category').annotate(total=Sum('amount'))
+            # Category totals before category filter
             categories = {
-                item['category']: float(round(item['total'], 2)) 
-                for item in all_categories_qs if item['category']
+                item['category']: float(round(item['total'], 2))
+                for item in qs.values('category').annotate(total=Sum('amount'))
+                if item['category']
             }
 
-            # 2. Filter Transactions by Selected Category
             selected_category = request.GET.get('category', 'all')
             if selected_category != 'all':
                 qs = qs.filter(category__iexact=selected_category)
 
-            # 3. Aggregations on filtered QuerySet
             raw_spend = qs.aggregate(Sum('amount'))['amount__sum']
             total_spend = float(raw_spend) if raw_spend is not None else 0.0
             total_transactions = qs.count()
 
-            anomalies_qs = qs.filter(is_anomaly=True).values('merchant', 'date', 'amount')
             anomalies = [
                 {
-                    "Merchant": item['merchant'], 
-                    "Date": str(item['date']), 
-                    "Amount": float(item['amount'])
+                    "Merchant": item['merchant'],
+                    "Date": str(item['date']),
+                    "Amount": float(item['amount']),
                 }
-                for item in anomalies_qs
+                for item in qs.filter(is_anomaly=True).values('merchant', 'date', 'amount')
             ]
 
-            # 4. Itemized Transactions
             transactions_list = [
                 {
                     "id": t.id,
@@ -125,82 +124,95 @@ class DashboardApiView(APIView):
                     "date": str(t.date),
                     "amount": float(t.amount),
                     "category": t.category,
-                    "is_anomaly": t.is_anomaly
+                    "is_anomaly": t.is_anomaly,
                 }
                 for t in qs.order_by('-date')
             ]
 
-            # 5. Forecast Calculation
+            # ---- Forecast: LR with day-of-week dummies ----
             forecast = [0.0] * 7
             if qs.exists():
                 df = pd.DataFrame(list(qs.values('date', 'amount')))
                 df['date'] = pd.to_datetime(df['date'])
                 daily = df.groupby('date')['amount'].sum().reset_index()
 
-                if len(daily) >= 7:
+                if len(daily) >= 2:
                     daily['day_num'] = (daily['date'] - daily['date'].min()).dt.days
-                    daily['day_of_week'] = daily['date'].dt.dayofweek
+                    daily['dow'] = daily['date'].dt.dayofweek
 
-                    X = daily[['day_num', 'day_of_week']]
+                    dow_dummies = pd.get_dummies(daily['dow'], prefix='dow', drop_first=True)
+                    X = pd.concat([daily[['day_num']], dow_dummies], axis=1)
                     y = daily['amount']
 
-                    model = RandomForestRegressor(n_estimators=100, random_state=42).fit(X, y)
+                    model = LinearRegression().fit(X, y)
 
                     last_date = daily['date'].max()
-                    future_dates = [last_date + timedelta(days=i) for i in range(1, 8)]
-                    
-                    future_df = pd.DataFrame({
-                        'day_num': [(d - daily['date'].min()).days for d in future_dates],
-                        'day_of_week': [d.dayofweek for d in future_dates]
-                    })
+                    last_day_num = int(daily['day_num'].max())
+                    future = []
+                    for i in range(1, 8):
+                        fd = last_date + timedelta(days=i)
+                        row = {'day_num': last_day_num + i}
+                        for col in dow_dummies.columns:
+                            row[col] = 1 if col == f'dow_{fd.dayofweek}' else 0
+                        future.append(row)
+                    future_df = pd.DataFrame(future).reindex(columns=X.columns, fill_value=0)
+                    forecast = [
+                        float(round(max(0.0, v), 2))
+                        for v in model.predict(future_df)
+                    ]
 
-                    forecast = [float(round(max(0.0, val), 2)) for val in model.predict(future_df)]
-
-                elif len(daily) >= 2:
-                    daily['day_num'] = (daily['date'] - daily['date'].min()).dt.days
-                    model = LinearRegression().fit(daily[['day_num']], daily['amount'])
-                    last_day = daily['day_num'].max()
-                    
-                    future_df = pd.DataFrame(
-                        [[last_day + i] for i in range(1, 8)], 
-                        columns=['day_num']
-                    )
-                    forecast = [float(round(max(0.0, val), 2)) for val in model.predict(future_df)]
-
-            # 6. Dynamic Budget Optimization Recommendations
+            # ---- Recommendations with structured `category` field ----
             recommendations = []
             if categories:
                 sorted_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)
                 top_cat_name, top_cat_val = sorted_cats[0]
                 recommendations.append({
                     "id": 1,
+                    "action": "optimize",
+                    "category": top_cat_name,
                     "title": f"Optimize {top_cat_name} Spend",
-                    "description": f"Saves ~₹{round(top_cat_val * 0.15, 2)}/mo. High concentration of expenses detected in this category."
+                    "description": (
+                        f"Cap reduces {top_cat_name} by ~15% "
+                        f"(₹{round(top_cat_val * 0.15, 2)}/mo potential savings)."
+                    ),
                 })
                 if len(sorted_cats) > 1:
                     sec_cat_name, sec_cat_val = sorted_cats[1]
                     recommendations.append({
                         "id": 2,
+                        "action": "cap",
+                        "category": sec_cat_name,
                         "title": f"Cap {sec_cat_name} Budget",
-                        "description": f"Saves ~₹{round(sec_cat_val * 0.10, 2)}/mo. Setting a weekly threshold prevents overspending."
+                        "description": (
+                            f"Setting a cap on {sec_cat_name} "
+                            f"saves ~₹{round(sec_cat_val * 0.10, 2)}/mo."
+                        ),
                     })
                 else:
                     recommendations.append({
                         "id": 2,
+                        "action": "cap",
+                        "category": None,
                         "title": "Establish Monthly Savings Cap",
-                        "description": "Saves ~₹500/mo. Limiting discretionary weekend purchases keeps targets on track."
+                        "description": "Limiting discretionary weekend purchases keeps targets on track.",
                     })
             else:
-                recommendations = [
-                    {"id": 1, "title": "Upload Statement", "description": "Upload a UPI CSV to generate custom AI budget advice."}
-                ]
+                recommendations = [{
+                    "id": 1,
+                    "action": "upload",
+                    "category": None,
+                    "title": "Upload Statement",
+                    "description": "Upload a UPI CSV to generate custom AI budget advice.",
+                }]
 
-            recommended_savings = float(round(sum(a['Amount'] for a in anomalies) + (total_spend * 0.10), 2))
+            recommended_savings = float(round(
+                sum(a['Amount'] for a in anomalies) + (total_spend * 0.10), 2
+            ))
 
-            # 7. Fetch active saved budgets to pass to frontend display
+            current_target_month = latest_date.strftime('%Y-%m')
             active_budgets = {
-                b.category: float(b.monthly_cap) 
-                for b in CategoryBudget.objects.all()
+                b.category: float(b.monthly_cap)
+                for b in CategoryBudget.objects.filter(target_month=current_target_month)
             }
 
             return Response({
@@ -213,7 +225,8 @@ class DashboardApiView(APIView):
                 "recommended_savings": recommended_savings,
                 "forecast_7_days": forecast,
                 "recommendations": recommendations,
-                "active_budgets": active_budgets
+                "active_budgets": active_budgets,
+                "target_month": current_target_month,
             })
 
         except Exception as e:
@@ -223,42 +236,78 @@ class DashboardApiView(APIView):
 
 class OptimizeBudgetApiView(APIView):
     """
-    Handles AI Linear Programming constraints, calculates caps, and saves them to the database.
+    Real Linear Programming budget optimization via scipy.optimize.linprog.
+    Target month is always derived from the DB — never trusted from frontend.
     """
     def post(self, request):
         try:
-            data = request.data
-            selected_categories = data.get('categories', [])
-            target_month = data.get('target_month', '2026-09')
-            
-            total_saved = 0
-            optimized_caps = {}
+            selected_categories = request.data.get('categories', [])
+            if not selected_categories:
+                return Response(
+                    {"status": "error", "message": "No categories provided."},
+                    status=400,
+                )
 
             qs = Transaction.objects.all()
-            for cat in selected_categories:
-                cat_total = qs.filter(category__iexact=cat).aggregate(Sum('amount'))['amount__sum'] or 0
-                target_cap = float(cat_total) * 0.85  # 15% reduction constraint via Linear Programming model
-                capped_value = round(target_cap, 2)
-                
-                optimized_caps[cat] = capped_value
-                total_saved += float(cat_total) - capped_value
+            if not qs.exists():
+                return Response(
+                    {"status": "error", "message": "No transactions to optimize."},
+                    status=400,
+                )
 
-                # Save or update the budget constraint permanently in the database
+            latest_date = Transaction.objects.latest('date').date
+            target_month = latest_date.strftime('%Y-%m')
+
+            # Only last 30 days → true monthly baseline
+            qs = qs.filter(date__gte=latest_date - timedelta(days=30))
+
+            # Single aggregation, no N+1
+            totals = {
+                row['category'].strip().title(): float(row['total'])
+                for row in qs.values('category').annotate(total=Sum('amount'))
+                if row['category']
+            }
+
+            # Restrict to what the user actually selected
+            selected_norm = {
+                str(c).strip().title(): totals.get(str(c).strip().title(), 0.0)
+                for c in selected_categories if c
+            }
+
+            if not selected_norm or all(v == 0 for v in selected_norm.values()):
+                return Response(
+                    {
+                        "status": "error",
+                        "message": "Selected categories have no spend in the last 30 days.",
+                    },
+                    status=400,
+                )
+
+            # === Real LP solver ===
+            optimized_caps = optimize_budget_caps(selected_norm)
+
+            total_saved = sum(
+                selected_norm[cat] - optimized_caps.get(cat, selected_norm[cat])
+                for cat in selected_norm
+            )
+
+            # Persist. unique_together guarantees one row per (category, month).
+            for cat, cap in optimized_caps.items():
                 CategoryBudget.objects.update_or_create(
-                    category__iexact=cat,
+                    category=cat,
                     target_month=target_month,
-                    defaults={
-                        'category': cat,
-                        'monthly_cap': Decimal(str(capped_value))
-                    }
+                    defaults={'monthly_cap': Decimal(str(cap))},
                 )
 
             return Response({
                 "status": "success",
-                "message": "AI Linear Programming constraints saved and enforced for the target month.",
+                "message": "Linear Programming constraints solved and saved for the target month.",
+                "target_month": target_month,
                 "optimized_caps": optimized_caps,
-                "total_optimized_savings": round(total_saved, 2)
+                "historical_spend": selected_norm,
+                "total_optimized_savings": round(total_saved, 2),
             })
+
         except Exception as e:
             traceback.print_exc()
             return Response({"error": str(e)}, status=500)
