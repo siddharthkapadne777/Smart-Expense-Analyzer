@@ -1,7 +1,11 @@
 import React, { useState } from 'react';
 import { Sparkles, CheckCircle2, Loader2 } from 'lucide-react';
+import { useAuth } from '../context/AuthContext'; // <-- ADDED
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
 export default function BudgetOptimizer({ recommendations = [], activeBudgets = {}, onSuccess }) {
+  const { token } = useAuth(); // <-- GET TOKEN
   const [selectedIds, setSelectedIds] = useState(recommendations.map(r => r.id));
   const [isProcessing, setIsProcessing] = useState(false);
   const [optimizationResult, setOptimizationResult] = useState(null);
@@ -21,11 +25,8 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
     setErrorMsg(null);
     setOptimizationResult(null);
 
-    // Use the structured `category` field — no more regex parsing of titles.
     const activeRecs = recommendations.filter(r => selectedIds.includes(r.id));
-    const categoriesToOptimize = activeRecs
-      .map(r => r.category)
-      .filter(Boolean); // drop "Establish Monthly Savings Cap" placeholders
+    const categoriesToOptimize = activeRecs.map(r => r.category).filter(Boolean);
 
     if (categoriesToOptimize.length === 0) {
       setErrorMsg("None of the selected recommendations map to a real category.");
@@ -34,29 +35,26 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
     }
 
     try {
-      const res = await fetch('http://127.0.0.1:8000/api/optimize/', {
+      const res = await fetch(`${API_BASE}/api/optimize/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // No target_month sent — backend derives it from the DB.
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Token ${token}` // <-- ATTACHED TOKEN
+        },
         body: JSON.stringify({ categories: categoriesToOptimize })
       });
 
       const data = await res.json();
 
       if (!res.ok || data.status === 'error') {
-        setErrorMsg(data.error || data.message || `Server error ${res.status}`);
-        return;
+        throw new Error(data.message || data.error || `Server error ${res.status}`);
       }
 
       setOptimizationResult(data);
-
-      if (onSuccess) {
-        await onSuccess();
-      }
-
+      if (onSuccess) await onSuccess();
     } catch (err) {
       console.error("AI Optimization error:", err);
-      setErrorMsg("Failed to reach the optimization service.");
+      setErrorMsg(err.message);
     } finally {
       setIsProcessing(false);
     }
@@ -69,9 +67,7 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
           <Sparkles className="w-5 h-5 text-indigo-400" />
           <h3 className="text-lg font-bold text-white">AI Budget Optimization</h3>
         </div>
-        <p className="text-xs text-slate-400">
-          Apriori association rule mining + Linear Programming recommendations
-        </p>
+        <p className="text-xs text-slate-400">Apriori association rule mining + Linear Programming recommendations</p>
       </div>
 
       <div className="space-y-3 my-4">
@@ -83,8 +79,8 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
                 key={rec.id}
                 onClick={() => toggleSelection(rec.id)}
                 className={`p-4 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-3 ${
-                  isSelected
-                    ? 'bg-slate-800/60 border-indigo-500/50 shadow-lg shadow-indigo-500/5'
+                  isSelected 
+                    ? 'bg-slate-800/60 border-indigo-500/50 shadow-lg shadow-indigo-500/5' 
                     : 'bg-slate-800/20 border-slate-800 opacity-60 hover:opacity-100'
                 }`}
               >
@@ -92,15 +88,13 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
                   <h4 className={`text-sm font-semibold mb-1 ${isSelected ? 'text-indigo-300' : 'text-slate-400'}`}>
                     {rec.title}
                   </h4>
-                  <p className="text-xs text-slate-400 leading-relaxed">
-                    {rec.description}
-                  </p>
+                  <p className="text-xs text-slate-400 leading-relaxed">{rec.description}</p>
                 </div>
                 <div className="mt-0.5">
                   <input
                     type="checkbox"
                     checked={isSelected}
-                    onChange={() => {}}
+                    onChange={() => {}} 
                     className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                   />
                 </div>
@@ -138,13 +132,8 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
           }`}
         >
           {isProcessing ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>Running Linear Programming Solver...</span>
-            </>
-          ) : (
-            'Apply Optimization Strategy'
-          )}
+            <><Loader2 className="w-4 h-4 animate-spin" /><span>Solving LP...</span></>
+          ) : 'Apply Optimization Strategy'}
         </button>
 
         {errorMsg && (
@@ -157,12 +146,9 @@ export default function BudgetOptimizer({ recommendations = [], activeBudgets = 
           <div className="mt-3 p-3 bg-indigo-950/40 border border-indigo-500/30 rounded-xl space-y-1 text-indigo-300 text-xs animate-fade-in">
             <div className="flex items-center gap-2 font-semibold">
               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>Linear Programming Constraints Saved!</span>
+              <span>Constraints Saved!</span>
             </div>
-            <p className="text-slate-400">
-              Committed monthly caps for <strong className="text-white">{optimizationResult.target_month}</strong>.
-              Total optimized target savings: <strong className="text-white">₹{optimizationResult.total_optimized_savings}</strong>
-            </p>
+            <p className="text-slate-400">Target savings: <strong className="text-white">₹{optimizationResult.total_optimized_savings}</strong></p>
           </div>
         )}
       </div>

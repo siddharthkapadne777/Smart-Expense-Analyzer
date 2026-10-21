@@ -4,9 +4,12 @@ import { Line } from 'react-chartjs-2';
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
-export default function ForecastChart({ forecastDataArray }) {
+export default function ForecastChart({ forecastDataArray, forecastDates = [] }) {
+  const fallbackLabels = ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7'];
+  const labels = forecastDates.length === 7 ? forecastDates : fallbackLabels;
+
   const forecastData = {
-    labels: ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7'],
+    labels,
     datasets: [{
       label: '7-Day Forecasted Spend (₹)',
       data: forecastDataArray || [0, 0, 0, 0, 0, 0, 0],
@@ -24,7 +27,18 @@ export default function ForecastChart({ forecastDataArray }) {
         <p className="text-xs text-slate-400 mb-6">Proactive time-series analysis for daily budget management</p>
       </div>
       <div className="h-[260px] w-full">
-        <Line data={forecastData} options={{ responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } }, y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } } } }} />
+        <Line
+          data={forecastData}
+          options={{
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } },
+              y: { grid: { color: '#1e293b' }, ticks: { color: '#94a3b8' } },
+            },
+          }}
+        />
       </div>
     </div>
   );

@@ -30,3 +30,20 @@
   scrollbar-width: thin;
   scrollbar-color: #334155 rgba(15, 23, 42, 0.5);
 }
+
+
+/* Custom Scrollbar for the Chart */
+.custom-scrollbar::-webkit-scrollbar {
+  height: 8px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(30, 41, 59, 0.5); /* slate-800 */
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #4f46e5; /* indigo-600 */
+  border-radius: 4px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #6366f1; /* indigo-500 */
+}
