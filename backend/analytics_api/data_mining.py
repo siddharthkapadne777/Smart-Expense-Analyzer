@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
@@ -16,8 +15,9 @@ def run_kmeans_pca(transactions):
     vectorizer = TfidfVectorizer(max_features=100, stop_words='english')
     X = vectorizer.fit_transform(merchants).toarray()
 
-    # 2. K-Means Clustering (group into up to 5 categories)
-    n_clusters = min(5, len(merchants))
+    # 2. K-Means Clustering (Dynamic number of clusters based on data size)
+    # Agar 20 transactions hain toh 5 clusters, agar 100 hain toh 10 clusters
+    n_clusters = min(10, max(3, len(merchants) // 5))
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
     kmeans.fit(X)
     
@@ -38,20 +38,28 @@ def run_kmeans_pca(transactions):
     return scatter_data
 
 def run_apriori(transactions):
-    """Finds associations between categories (e.g., Coffee & Transport)."""
+    """Finds associations between categories."""
     if not transactions:
         return []
 
-    # Group by date to find things bought on the same day
+    # IGNORE 'Peer Transfer' and 'General Expense' -> Apriori should only find 
+    # patterns in actual spending, not money transfers.
+    ignore_categories = {'Peer Transfer', 'General Expense', 'Personal Transfer'}
+
     daily_categories = {}
     for tx in transactions:
+        if tx.category in ignore_categories:
+            continue # Skip transfers
+
         date_str = str(tx.date)
         if date_str not in daily_categories:
             daily_categories[date_str] = set()
         daily_categories[date_str].add(tx.category)
 
     dataset = [list(cats) for cats in daily_categories.values()]
-    if len(dataset) < 2:
+    
+    # We need at least some days of data to find patterns
+    if len(dataset) < 3:
         return []
 
     te = TransactionEncoder()
@@ -63,7 +71,10 @@ def run_apriori(transactions):
     if frequent_itemsets.empty:
         return []
 
-    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.5)
+    # Generate rules with 60% confidence
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.6)
+    
+    # Filter for interesting rules (Lift > 1.0)
     rules = rules[rules['lift'] > 1.0].sort_values(by='confidence', ascending=False)
 
     insights = []

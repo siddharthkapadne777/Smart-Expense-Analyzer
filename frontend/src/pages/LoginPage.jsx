@@ -6,7 +6,7 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000';
 
 export default function LoginPage() {
     const [isLogin, setIsLogin] = useState(true);
-    const [username, setUsername] = useState('');
+    const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
@@ -19,32 +19,44 @@ export default function LoginPage() {
 
         try {
             if (!isLogin) {
-                // 1. Handle Signup
+                // SIGNUP: Backend mein email ko hi username ki tarah bhej rahe hain
                 const regRes = await fetch(`${API_BASE}/api/auth/users/`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password, re_password: password })
+                    body: JSON.stringify({ 
+                        username: email,  // <-- EMAIL AS USERNAME
+                        email: email, 
+                        password, 
+                        re_password: password 
+                    })
                 });
+                
+                const regData = await regRes.json();
+
                 if (!regRes.ok) {
-                    const regData = await regRes.json();
-                    throw new Error(Object.values(regData).flat()[0] || 'Signup failed');
+                    const errorMsg = Object.values(regData).flat()[0] || 'Signup failed. Use a strong password.';
+                    throw new Error(errorMsg);
                 }
             }
 
-            // 2. Handle Login
+            // LOGIN: Wahi email as username bhej rahe hain
             const loginRes = await fetch(`${API_BASE}/api/auth/token/login/`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ 
+                    username: email, // <-- EMAIL AS USERNAME
+                    password 
+                }) 
             });
+            
             const loginData = await loginRes.json();
             
             if (!loginRes.ok) {
-                throw new Error(loginData.non_field_errors?.[0] || 'Invalid credentials');
+                throw new Error(loginData.non_field_errors?.[0] || 'Unable to log in with provided credentials.');
             }
 
             login(loginData.auth_token);
-            window.location.href = '/'; // Reload page to show dashboard
+            window.location.href = '/'; 
 
         } catch (err) {
             setError(err.message);
@@ -75,13 +87,14 @@ export default function LoginPage() {
 
                 <form onSubmit={handleSubmit} className="space-y-4">
                     <div>
-                        <label className="block text-xs font-medium text-slate-400 mb-1">Username</label>
+                        <label className="block text-xs font-medium text-slate-400 mb-1">Email Address</label>
                         <input
-                            type="text"
+                            type="email"
                             required
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
                             className="w-full bg-slate-950 text-white text-sm px-4 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"
+                            placeholder="you@example.com"
                         />
                     </div>
                     <div>
@@ -92,13 +105,14 @@ export default function LoginPage() {
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             className="w-full bg-slate-950 text-white text-sm px-4 py-2.5 rounded-xl border border-slate-800 focus:outline-none focus:border-indigo-500"
+                            placeholder="••••••••"
                         />
                     </div>
 
                     <button
                         type="submit"
                         disabled={loading}
-                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition flex justify-center items-center mt-6"
+                        className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl transition flex justify-center items-center mt-6 shadow-lg shadow-indigo-600/20"
                     >
                         {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : (isLogin ? 'Log In' : 'Sign Up')}
                     </button>

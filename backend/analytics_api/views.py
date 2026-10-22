@@ -13,6 +13,7 @@ from .optimizer import optimize_budget_caps
 from .data_mining import run_kmeans_pca, run_apriori
 from .models import Transaction, CategoryBudget, MerchantCategory
 
+
 class UploadApiView(APIView):
     parser_classes = [MultiPartParser]
 
@@ -126,7 +127,7 @@ class DashboardApiView(APIView):
                 for t in qs.order_by('-date')
             ]
 
-            # ---- Forecast (Smooth Trend + Weekday Blend) ----
+            # ---- Forecast (Realistic Trend based on recent actual days) ----
             forecast = [0.0] * 7
             forecast_dates = []
             if qs.exists():
@@ -136,7 +137,7 @@ class DashboardApiView(APIView):
                 daily = df.groupby('date')['amount'].sum().reset_index()
                 n_days = len(daily)
 
-                if n_days < 14:
+                if n_days < 7:
                     # Not enough data, just use recent average
                     avg = float(daily['amount'].tail(7).mean()) if n_days > 0 else 0.0
                     forecast = [round(avg, 2)] * 7
@@ -152,12 +153,15 @@ class DashboardApiView(APIView):
                     daily['amount'] = daily['amount'].astype(float)
                     daily['dow'] = daily['date'].dt.dayofweek
 
-                    # 1. Use recent 7-day moving average to smooth spikes
-                    recent_7d_avg = float(daily['amount'].tail(7).mean())
+                    # 1. Pichle 14 dino ka weekday-wise average
+                    recent = daily.tail(14)
+                    dow_avg = recent.groupby('dow')['amount'].mean().to_dict()
                     
-                    # 2. Get weekday medians from last 28 days
-                    recent = daily.tail(28)
-                    dow_baseline = recent.groupby('dow')['amount'].median().to_dict()
+                    # 2. Overall Trend Factor calculate karein
+                    recent_avg = float(daily['amount'].tail(7).mean())
+                    prev_avg = float(daily['amount'].tail(14).head(7).mean())
+                    trend_factor = (recent_avg / prev_avg) if prev_avg > 0 else 1.0
+                    trend_factor = max(0.8, min(1.2, trend_factor)) # Clamp between 0.8x and 1.2x
 
                     last_date = daily['date'].max()
                     forecast = []
@@ -165,12 +169,13 @@ class DashboardApiView(APIView):
                     
                     for i in range(1, 8):
                         fd = last_date + timedelta(days=i)
-                        weekday_val = dow_baseline.get(fd.dayofweek, recent_7d_avg)
+                        base_val = dow_avg.get(fd.dayofweek, recent_avg)
+                        predicted = base_val * trend_factor
                         
-                        # 3. Blend heavily towards recent average (70% avg, 30% weekday) 
-                        # This prevents random massive spikes
-                        predicted = (0.7 * recent_7d_avg) + (0.3 * weekday_val)
-                        
+                        # Prevent extremely low flatlines if a day had 0 spend
+                        if predicted < 50:
+                            predicted = (predicted * 0.5) + (recent_avg * 0.5)
+
                         forecast.append(float(round(max(0.0, predicted), 2)))
                         forecast_dates.append(fd.strftime('%a, %b %d'))
 
@@ -332,7 +337,7 @@ class BudgetHistoryApiView(APIView):
             budgets = CategoryBudget.objects.filter(user=request.user).order_by('-target_month', 'category')
             history = []
 
-            # SYSTEM DATE ki jagah, USER ke latest uploaded transaction ka month nikal rahe hain
+            # User ke latest uploaded transaction ka month nikal rahe hain
             latest_tx = Transaction.objects.filter(user=request.user).order_by('-date').first()
             if latest_tx:
                 current_active_month = latest_tx.date.strftime('%Y-%m')
@@ -352,9 +357,7 @@ class BudgetHistoryApiView(APIView):
                 cap = b.monthly_cap
                 difference = cap - actual_spend
                 
-                # LOGIC CHANGE: 
-                # Agar target_month user ke LATEST data wale month ke barabar hai, 
-                # toh usko "In Progress" maano.
+                # Agar target_month user ke LATEST data wale month ke barabar ya usse aage hai, toh In Progress
                 if b.target_month >= current_active_month:
                     status = "in_progress"
                     message = "Currently tracking"
@@ -420,10 +423,29 @@ class SpendingTrendApiView(APIView):
 class DataMiningApiView(APIView):
     def get(self, request):
         try:
-            qs = list(Transaction.objects.filter(user=request.user))
-            
-            scatter_data = run_kmeans_pca(qs)
-            apriori_insights = run_apriori(qs)
+            time_range = request.GET.get('range', 'month') # Default to month
+            qs = Transaction.objects.filter(user=request.user)
+
+            if qs.exists():
+                latest_date = qs.latest('date').date
+            else:
+                latest_date = datetime.now().date()
+
+            # Filter logic based on selection
+            if time_range == 'month':
+                qs = qs.filter(date__gte=latest_date - timedelta(days=30))
+            elif time_range == 'year':
+                qs = qs.filter(date__gte=latest_date - timedelta(days=365))
+            elif time_range == 'custom':
+                start_date = request.GET.get('start_date')
+                end_date = request.GET.get('end_date')
+                if start_date and end_date:
+                    qs = qs.filter(date__range=[start_date, end_date])
+
+            # Ab filtered data ko ML models mein bhejenge
+            qs_list = list(qs)
+            scatter_data = run_kmeans_pca(qs_list)
+            apriori_insights = run_apriori(qs_list)
 
             return Response({
                 "status": "success", 
